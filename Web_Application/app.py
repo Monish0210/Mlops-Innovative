@@ -1,4 +1,5 @@
 import os
+import __main__
 from flask import Flask, render_template, request, url_for
 from PIL import Image
 import torch
@@ -57,6 +58,9 @@ def load_model():
             print(f"ERROR: Model file not found at {model_path}")
             return "not_found"
         
+        # The saved artifact was created from a notebook, where SiamUnet was
+        # serialized as __main__.SiamUnet.
+        __main__.SiamUnet = SiamUnet
         model_loaded = torch.load(model_path, map_location=device, weights_only=False)
         model_loaded.eval()
         print("Model loaded.")

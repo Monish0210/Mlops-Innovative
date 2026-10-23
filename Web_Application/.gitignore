@@ -1,5 +1,6 @@
 __pycache__/
 *.pt
+!siamUnet.pt
 *.zip
 .venv/
 .env
