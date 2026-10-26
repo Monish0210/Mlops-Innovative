@@ -1,6 +1,8 @@
 flask
-torch
-torchvision
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
 Pillow
 gunicorn
-numpy
+numpy==1.26.4
+
+--extra-index-url https://download.pytorch.org/whl/cpu

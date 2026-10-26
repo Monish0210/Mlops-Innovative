@@ -188,6 +188,14 @@ def evaluation():
     }
     return render_template('evaluation.html', metrics=metrics)
 
+
+@app.route('/health')
+def health():
+    if model == "not_found":
+        return {"status": "unhealthy", "model_loaded": False}, 503
+    return {"status": "healthy", "model_loaded": True}, 200
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
