@@ -1,6 +1,7 @@
 import os
 import __main__
-from flask import Flask, render_template, request, url_for
+import math
+from flask import Flask, render_template, request, send_from_directory, url_for
 from PIL import Image
 import torch
 from torchvision import transforms
@@ -8,16 +9,23 @@ from model import SiamUnet
 import json
 import uuid
 import numpy as np
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-UPLOAD_FOLDER = os.path.join('static', 'uploads')
+UPLOAD_FOLDER = os.environ.get(
+    'UPLOAD_FOLDER',
+    os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'uploads'))
+)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MODEL_PATH'] = os.path.join(os.path.dirname(__file__), 'siamUnet.pt') # Use os.path.join for safety
 app.config['DEFAULT_GSD'] = 0.5
 app.config['ORIGINAL_IMAGE_SIZE'] = 1024
 app.config['MODEL_IMAGE_SIZE'] = 256
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_BYTES', 32 * 1024 * 1024))
+app.config['MAX_IMAGE_PIXELS'] = int(os.environ.get('MAX_IMAGE_PIXELS', 25_000_000))
+app.config['ALLOWED_IMAGE_EXTENSIONS'] = {'jpg', 'jpeg', 'png', 'webp', 'tif', 'tiff'}
 
 # Ensure local upload folder exists right at the start
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -71,7 +79,35 @@ def load_model():
 
 model = load_model()
 
-# We no longer need the @app.before_request function
+def validate_uploaded_image(file_storage, destination):
+    filename = secure_filename(file_storage.filename or '')
+    extension = os.path.splitext(filename)[1].lower().lstrip('.')
+    if not filename or extension not in app.config['ALLOWED_IMAGE_EXTENSIONS']:
+        raise ValueError('Unsupported image type. Use JPG, PNG, WEBP, or TIFF.')
+
+    file_storage.save(destination)
+    try:
+        with Image.open(destination) as image:
+            image.verify()
+        with Image.open(destination) as image:
+            width, height = image.size
+            if width * height > app.config['MAX_IMAGE_PIXELS']:
+                raise ValueError('Image dimensions exceed the configured limit.')
+    except ValueError:
+        if os.path.exists(destination):
+            os.remove(destination)
+        raise
+    except Exception as error:
+        if os.path.exists(destination):
+            os.remove(destination)
+        raise ValueError('Invalid or corrupted image.') from error
+
+    return filename
+
+
+@app.errorhandler(413)
+def request_entity_too_large(_error):
+    return 'Uploaded files exceed the configured size limit.', 413
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -85,13 +121,15 @@ def index():
         pre_image_file = request.files['pre_image']
         post_image_file = request.files['post_image']
 
-        if pre_image_file.filename == '' or post_image_file.filename == '':
+        if not pre_image_file.filename or not post_image_file.filename:
             return "No selected file", 400
         
         try:
             gsd = float(request.form.get('gsd', app.config['DEFAULT_GSD']))
-        except ValueError:
-            gsd = app.config['DEFAULT_GSD']
+        except (TypeError, ValueError):
+            return "Ground Sample Distance must be a valid positive number.", 400
+        if not math.isfinite(gsd) or gsd <= 0:
+            return "Ground Sample Distance must be a valid positive number.", 400
             
         
         original_area_per_pixel = gsd * gsd
@@ -100,8 +138,8 @@ def index():
         
 
         unique_id = str(uuid.uuid4())
-        pre_filename = f"pre_{unique_id}_{pre_image_file.filename}"
-        post_filename = f"post_{unique_id}_{post_image_file.filename}"
+        pre_filename = f"pre_{unique_id}_{secure_filename(pre_image_file.filename)}"
+        post_filename = f"post_{unique_id}_{secure_filename(post_image_file.filename)}"
         output_filename = f"output_{unique_id}.png"
 
         pre_image_path = os.path.join(app.config['UPLOAD_FOLDER'], pre_filename)
@@ -109,11 +147,19 @@ def index():
         output_image_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
 
         try:
-            pre_image_file.save(pre_image_path)
-            post_image_file.save(post_image_path)
+            try:
+                validate_uploaded_image(pre_image_file, pre_image_path)
+                validate_uploaded_image(post_image_file, post_image_path)
+            except ValueError as error:
+                for path in (pre_image_path, post_image_path):
+                    if os.path.exists(path):
+                        os.remove(path)
+                return str(error), 400
 
-            pre_image = Image.open(pre_image_path).convert("RGB")
-            post_image = Image.open(post_image_path).convert("RGB")
+            with Image.open(pre_image_path) as source:
+                pre_image = source.convert("RGB")
+            with Image.open(post_image_path) as source:
+                post_image = source.convert("RGB")
             pre_image_tensor = transform(pre_image).unsqueeze(0).to(device)
             post_image_tensor = transform(post_image).unsqueeze(0).to(device)
 
@@ -147,9 +193,9 @@ def index():
             output_image.save(output_image_path)
 
             return render_template('index.html',
-                                   pre_image_rel_path=url_for('static', filename=f'uploads/{pre_filename}'),
-                                   post_image_rel_path=url_for('static', filename=f'uploads/{post_filename}'),
-                                   output_image_rel_path=url_for('static', filename=f'uploads/{output_filename}'),
+                                   pre_image_rel_path=url_for('uploaded_file', filename=pre_filename),
+                                   post_image_rel_path=url_for('uploaded_file', filename=post_filename),
+                                   output_image_rel_path=url_for('uploaded_file', filename=output_filename),
                                    damage_analysis_percent_json=json.dumps(damage_analysis_percent),
                                    damage_analysis_area_json=json.dumps(damage_analysis_area),
                                    damage_analysis_area_dict=damage_analysis_area, 
@@ -168,6 +214,11 @@ def index():
 @app.route('/sample_images')
 def sample_images():
     return render_template('sample_images.html')
+
+
+@app.route('/uploads/<path:filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
 @app.route('/evaluation')
