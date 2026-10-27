@@ -10,7 +10,7 @@ services:
       - "5000:5000"
     volumes:
       - type: bind
-        source: ./uploads
+        source: ${UPLOADS_DIR:-./uploads}
         target: /uploads
     networks:
       - mlops
