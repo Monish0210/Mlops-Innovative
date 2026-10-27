@@ -1,0 +1,73 @@
+services:
+  web:
+    build:
+      context: ./Web_Application
+    image: mlops-innovative-web:local
+    environment:
+      PORT: "5000"
+      UPLOAD_FOLDER: /uploads
+    ports:
+      - "5000:5000"
+    volumes:
+      - type: bind
+        source: ./uploads
+        target: /uploads
+    networks:
+      - mlops
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - type: bind
+        source: ./monitoring/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - prometheus-data:/prometheus
+    networks:
+      - mlops
+    depends_on:
+      web:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - type: bind
+        source: ./grafana/provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+      - type: bind
+        source: ./grafana/dashboards
+        target: /var/lib/grafana/dashboards
+        read_only: true
+    networks:
+      - mlops
+    depends_on:
+      prometheus:
+        condition: service_started
+
+networks:
+  mlops:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
