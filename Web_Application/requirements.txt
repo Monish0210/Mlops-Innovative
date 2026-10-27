@@ -4,5 +4,6 @@ torchvision==0.25.0+cpu
 Pillow
 gunicorn
 numpy==1.26.4
+prometheus-client
 
 --extra-index-url https://download.pytorch.org/whl/cpu

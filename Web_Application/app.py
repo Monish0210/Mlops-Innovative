@@ -1,6 +1,7 @@
 import os
 import __main__
 import math
+import time
 from flask import Flask, render_template, request, send_from_directory, url_for
 from PIL import Image
 import torch
@@ -9,9 +10,33 @@ from model import SiamUnet
 import json
 import uuid
 import numpy as np
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+HTTP_REQUESTS = Counter(
+    'http_requests_total',
+    'Total HTTP requests handled by the application.',
+    ['method', 'route', 'status'],
+)
+HTTP_REQUEST_LATENCY = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request latency in seconds.',
+    ['method', 'route'],
+)
+PREDICTION_REQUESTS = Counter(
+    'prediction_requests_total',
+    'Total prediction requests received.',
+)
+PREDICTION_FAILURES = Counter(
+    'prediction_failures_total',
+    'Total prediction requests that failed.',
+)
+APPLICATION_HEALTH = Gauge(
+    'application_health',
+    'Application health status: 1 when healthy, 0 otherwise.',
+)
 
 # --- CONFIGURATION ---
 UPLOAD_FOLDER = os.environ.get(
@@ -78,6 +103,21 @@ def load_model():
         return "not_found"
 
 model = load_model()
+APPLICATION_HEALTH.set(0 if model == "not_found" else 1)
+
+
+@app.before_request
+def start_request_timer():
+    request.start_time = time.perf_counter()
+
+
+@app.after_request
+def record_request_metrics(response):
+    route = request.url_rule.rule if request.url_rule else 'unmatched'
+    duration = time.perf_counter() - request.start_time
+    HTTP_REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+    HTTP_REQUEST_LATENCY.labels(request.method, route).observe(duration)
+    return response
 
 def validate_uploaded_image(file_storage, destination):
     filename = secure_filename(file_storage.filename or '')
@@ -115,20 +155,25 @@ def index():
         return f"Model file '{app.config['MODEL_PATH']}' not found or failed to load.", 500
 
     if request.method == 'POST':
+        PREDICTION_REQUESTS.inc()
         if 'pre_image' not in request.files or 'post_image' not in request.files:
+            PREDICTION_FAILURES.inc()
             return "Missing pre or post image file", 400
             
         pre_image_file = request.files['pre_image']
         post_image_file = request.files['post_image']
 
         if not pre_image_file.filename or not post_image_file.filename:
+            PREDICTION_FAILURES.inc()
             return "No selected file", 400
         
         try:
             gsd = float(request.form.get('gsd', app.config['DEFAULT_GSD']))
         except (TypeError, ValueError):
+            PREDICTION_FAILURES.inc()
             return "Ground Sample Distance must be a valid positive number.", 400
         if not math.isfinite(gsd) or gsd <= 0:
+            PREDICTION_FAILURES.inc()
             return "Ground Sample Distance must be a valid positive number.", 400
             
         
@@ -154,6 +199,7 @@ def index():
                 for path in (pre_image_path, post_image_path):
                     if os.path.exists(path):
                         os.remove(path)
+                PREDICTION_FAILURES.inc()
                 return str(error), 400
 
             with Image.open(pre_image_path) as source:
@@ -207,6 +253,7 @@ def index():
             if os.path.exists(pre_image_path): os.remove(pre_image_path)
             if os.path.exists(post_image_path): os.remove(post_image_path)
             if os.path.exists(output_image_path): os.remove(output_image_path)
+            PREDICTION_FAILURES.inc()
             return f"An error occurred during processing: {e}", 500
 
     return render_template('index.html', gsd_used=app.config['DEFAULT_GSD']) 
@@ -219,6 +266,11 @@ def sample_images():
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+
+@app.route('/metrics')
+def metrics():
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 
 @app.route('/evaluation')
